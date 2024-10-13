@@ -105,3 +105,8 @@ let printList2 list =
 
 printList1 aNewList
 printList2 aNewList
+
+type PersonId = PersonId of int
+
+let initialPerson = { PersonId = PersonId 42; Name = "Joseph"}
+let updatedPerson = { initialPerson with Name = "John" }
