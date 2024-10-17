@@ -2,6 +2,10 @@
 
 open System
 
+type ResultBuilder() =
+    member this.Return(x) = Ok x
+    member this.Bind(m, f) = Result.bind f m
+
 // ---------------------------------------
 // 入力データ
 // ---------------------------------------
@@ -66,6 +70,8 @@ type RemoteServiceError =
 type CheckAddressExists = UnvalidatedAddress -> Result<CheckedAddress, RemoteServiceError>
 
 module Domain =
+    let result = ResultBuilder()
+
     let serviceExceptionAdapter serviceInfo serviceFn arg =
         try
             Ok(serviceFn arg)
@@ -313,29 +319,27 @@ module Domain =
             let orderId: OrderId = unvalidatedOrder.OrderId |> String50 |> OrderId
             let customerInfo: CustomerInfo = unvalidatedOrder.CustomerInfo |> toCustomerInfo
 
-            let shippingAddress =
-                unvalidatedOrder.ShippingAddress |> toAddress checkAddressExists
-
-            let billingAddress = unvalidatedOrder.BillingAddress |> toAddress checkAddressExists
-
             let orderLines: ValidatedOrderLine list =
                 unvalidatedOrder.Lines |> List.map (toValidatedOrderLine checkProductCodeExists)
 
-            match shippingAddress with
-            | Ok shippingAddress ->
-                match billingAddress with
-                | Ok billingAddress ->
-                    let validatedOrder: ValidatedOrder =
-                        { OrderId = orderId
-                          CustomerInfo = customerInfo
-                          ShippingAddress = shippingAddress
-                          BillingAddress = billingAddress
-                          Lines = orderLines }
+            result {
+                let! shippingAddress =
+                    unvalidatedOrder.ShippingAddress
+                    |> toAddress checkAddressExists
+                    |> Result.mapError RemoteService
 
-                    Ok validatedOrder
-                | Error error -> Error(RemoteService error)
-            | Error error -> Error(RemoteService error)
+                let! billingAddress =
+                    unvalidatedOrder.BillingAddress
+                    |> toAddress checkAddressExists
+                    |> Result.mapError RemoteService
 
+                return
+                    { OrderId = orderId
+                      CustomerInfo = customerInfo
+                      ShippingAddress = shippingAddress
+                      BillingAddress = billingAddress
+                      Lines = orderLines }
+            }
 
 
 
@@ -507,9 +511,9 @@ module Domain =
                 { EmailAddress = emailAddress
                   Letter = letter }
 
-            let result = sendOrderAcknowledgment acknowledgement
+            let sendResult = sendOrderAcknowledgment acknowledgement
 
-            match result with
+            match sendResult with
             | Sent ->
                 Some
                     { OrderId = pricedOrder.OrderId
@@ -576,13 +580,9 @@ module Domain =
             let acknowledgeOrder =
                 acknowledgeOrder createOrderAcknowledgmentLetter sendOrderAcknowledgment
 
-            let pricedOrder = unvalidatedOrder |> validateOrder |> Result.bind priceOrder
-
-            let orderAcknowledgementSent = pricedOrder |> Result.map acknowledgeOrder
-
-            match pricedOrder with
-            | Ok order ->
-                match orderAcknowledgementSent with
-                | Ok sent -> Ok(createEvents order sent)
-                | Error error -> Error error
-            | Error error -> Error error
+            result {
+                let! validatedOrder = unvalidatedOrder |> validateOrder
+                let! pricedOrder = priceOrder validatedOrder
+                let orderAcknowledgementSent = pricedOrder |> acknowledgeOrder
+                return createEvents pricedOrder orderAcknowledgementSent
+            }
