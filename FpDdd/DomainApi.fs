@@ -55,11 +55,25 @@ type CheckedAddress =
 
 type AddressValidationError = AddressValidationError of string
 
+type ServiceInfo = { Name: string; Endpoint: string }
+
+type RemoteServiceError =
+    { Service: ServiceInfo
+      Exception: Exception }
+
 // type CheckAddressExists = UnvalidatedAddress -> AsyncResult<CheckedAddress, AddressValidationError>
 
-type CheckAddressExists = UnvalidatedAddress -> CheckedAddress
+type CheckAddressExists = UnvalidatedAddress -> Result<CheckedAddress, RemoteServiceError>
 
 module Domain =
+    let serviceExceptionAdapter serviceInfo serviceFn arg =
+        try
+            Ok(serviceFn arg)
+        with :? TimeoutException as ex ->
+            Error
+                { Service = serviceInfo
+                  Exception = ex }
+
     type String50 = private String50 of string
 
     module String50 =
@@ -127,22 +141,26 @@ module Domain =
     let toAddress (checkAddressExists: CheckAddressExists) unvalidatedAddress =
         let checkedAddress = checkAddressExists unvalidatedAddress
 
-        let addressLine1 = checkedAddress.AddressLine1 |> String50.create
-        let addressLine2 = checkedAddress.AddressLine2 |> String50.createOption
-        let addressLine3 = checkedAddress.AddressLine3 |> String50.createOption
-        let addressLine4 = checkedAddress.AddressLine4 |> String50.createOption
-        let city = checkedAddress.City |> String50.create
-        let zipCode = checkedAddress.ZipCode |> ZipCode.create
+        match checkedAddress with
+        | Ok okAddress ->
+            let addressLine1 = okAddress.AddressLine1 |> String50.create
+            let addressLine2 = okAddress.AddressLine2 |> String50.createOption
+            let addressLine3 = okAddress.AddressLine3 |> String50.createOption
+            let addressLine4 = okAddress.AddressLine4 |> String50.createOption
+            let city = okAddress.City |> String50.create
+            let zipCode = okAddress.ZipCode |> ZipCode.create
 
-        let address: Address =
-            { AddressLine1 = addressLine1
-              AddressLine2 = addressLine2
-              AddressLine3 = addressLine3
-              AddressLine4 = addressLine4
-              City = city
-              ZipCode = zipCode }
+            let address: Address =
+                { AddressLine1 = addressLine1
+                  AddressLine2 = addressLine2
+                  AddressLine3 = addressLine3
+                  AddressLine4 = addressLine4
+                  City = city
+                  ZipCode = zipCode }
 
-        address
+            Ok address
+
+        | Error error -> Error error
 
     type WidgetCode = WidgetCode of string
     type GizmoCode = GizmoCode of string
@@ -166,6 +184,13 @@ module Domain =
     type ValidationError =
         { FieldName: string
           ErrorDescription: string }
+
+    type PricingError = PricingError of string
+
+    type PlaceOrderError =
+        | Validation of ValidationError
+        | Pricing of PricingError
+        | RemoteService of RemoteServiceError
 
 
     // ---------------------------------------
@@ -280,31 +305,36 @@ module Domain =
     // type ValidateOrder =
     //     CheckProductCodeExists -> CheckAddressExists -> UnvalidatedOrder -> ValidationResponse<ValidatedOrder>
 
-    type ValidateOrder = CheckProductCodeExists -> CheckAddressExists -> UnvalidatedOrder -> ValidatedOrder
+    type ValidateOrder =
+        CheckProductCodeExists -> CheckAddressExists -> UnvalidatedOrder -> Result<ValidatedOrder, PlaceOrderError>
 
     let validateOrder: ValidateOrder =
         fun checkProductCodeExists checkAddressExists unvalidatedOrder ->
             let orderId: OrderId = unvalidatedOrder.OrderId |> String50 |> OrderId
             let customerInfo: CustomerInfo = unvalidatedOrder.CustomerInfo |> toCustomerInfo
 
-            let shippingAddress: Address =
+            let shippingAddress =
                 unvalidatedOrder.ShippingAddress |> toAddress checkAddressExists
 
-            let billingAddress: Address =
-                unvalidatedOrder.BillingAddress |> toAddress checkAddressExists
+            let billingAddress = unvalidatedOrder.BillingAddress |> toAddress checkAddressExists
 
             let orderLines: ValidatedOrderLine list =
                 unvalidatedOrder.Lines |> List.map (toValidatedOrderLine checkProductCodeExists)
 
-            let validatedOrder: ValidatedOrder =
-                { OrderId = orderId
-                  CustomerInfo = customerInfo
-                  ShippingAddress = shippingAddress
-                  BillingAddress = billingAddress
-                  Lines = orderLines }
+            match shippingAddress with
+            | Ok shippingAddress ->
+                match billingAddress with
+                | Ok billingAddress ->
+                    let validatedOrder: ValidatedOrder =
+                        { OrderId = orderId
+                          CustomerInfo = customerInfo
+                          ShippingAddress = shippingAddress
+                          BillingAddress = billingAddress
+                          Lines = orderLines }
 
-            validatedOrder
-
+                    Ok validatedOrder
+                | Error error -> Error(RemoteService error)
+            | Error error -> Error(RemoteService error)
 
 
 
@@ -353,11 +383,7 @@ module Domain =
 
     type GetProductPrice = ProductCode -> Price
 
-    type PricingError = PricingError of string
-
-    // type PriceOrder = GetProductPrice -> ValidatedOrder -> Result<PricedOrder, PricingError>
-
-    type PriceOrder = GetProductPrice -> ValidatedOrder -> PricedOrder
+    type PriceOrder = GetProductPrice -> ValidatedOrder -> Result<PricedOrder, PricingError>
 
     type PriceOrderLine = GetProductPrice -> ValidatedOrderLine -> PricedOrderLine
 
@@ -391,7 +417,10 @@ module Domain =
                   ShippingAddress = validatedOrder.ShippingAddress
                   AmountToBill = amountToBill }
 
-            pricedOrder
+            Ok pricedOrder
+
+    let priceOrderAdapted getProductPrice validatedOrder =
+        priceOrder getProductPrice validatedOrder |> Result.mapError Pricing
 
     type HtmlString = HtmlString of string
 
@@ -407,8 +436,6 @@ module Domain =
         | OrderPlaced of OrderPlaced
         | BillableOrderPlaced of BillableOrderPlaced
         | AcknowledgementSent of OrderAcknowledgementSent
-
-    type PlaceOrderError = Undefined
 
     type PlaceOrderEvents =
         { Acknowledgement: OrderAcknowledgementSent
@@ -528,7 +555,7 @@ module Domain =
 
 
     // type PlaceOrderWorkflow = PlaceOrder -> AsyncResult<PlaceOrderEvent list, PlaceOrderError>
-    type PlaceOrderWorkflow = UnvalidatedOrder -> PlaceOrderEvent list
+    type PlaceOrderWorkflow = UnvalidatedOrder -> Result<PlaceOrderEvent list, PlaceOrderError>
 
     let placeOrder
         checkProductCodeExists
@@ -538,15 +565,24 @@ module Domain =
         sendOrderAcknowledgment
         : PlaceOrderWorkflow =
         fun unvalidatedOrder ->
+            let serviceInfo =
+                { Name = "AddressCheckingService"
+                  Endpoint = "https://address-checking.service/api" }
+
             let validateOrder = validateOrder checkProductCodeExists checkAddressExists
 
-            let priceOrder = priceOrder getProductPrice
+            let priceOrder = priceOrderAdapted getProductPrice
 
             let acknowledgeOrder =
                 acknowledgeOrder createOrderAcknowledgmentLetter sendOrderAcknowledgment
 
-            let pricedOrder = unvalidatedOrder |> validateOrder |> priceOrder
+            let pricedOrder = unvalidatedOrder |> validateOrder |> Result.bind priceOrder
 
-            let orderAcknowledgementSent = pricedOrder |> acknowledgeOrder
+            let orderAcknowledgementSent = pricedOrder |> Result.map acknowledgeOrder
 
-            createEvents pricedOrder orderAcknowledgementSent
+            match pricedOrder with
+            | Ok order ->
+                match orderAcknowledgementSent with
+                | Ok sent -> Ok(createEvents order sent)
+                | Error error -> Error error
+            | Error error -> Error error
