@@ -6,6 +6,21 @@ type ResultBuilder() =
     member this.Return(x) = Ok x
     member this.Bind(m, f) = Result.bind f m
 
+module Result =
+    type Prepend<'a, 'b> = Result<'a, 'b> -> Result<'a list, 'b list> -> Result<'a list, 'b list>
+
+    let prepend: Prepend<'a, 'b> =
+        fun firstR restR ->
+            match firstR, restR with
+            | Ok first, Ok rest -> Ok(first :: rest)
+            | Error e, Ok rest -> Error [ e ]
+            | Ok first, Error e -> Error e
+            | Error e1, Error e2 -> Error(e1 :: e2)
+
+    let sequence aListOfResults =
+        let initialValue = Ok []
+        List.foldBack prepend aListOfResults initialValue
+
 // ---------------------------------------
 // 入力データ
 // ---------------------------------------
@@ -194,7 +209,7 @@ module Domain =
     type PricingError = PricingError of string
 
     type PlaceOrderError =
-        | Validation of ValidationError
+        | Validation of ValidationError list
         | Pricing of PricingError
         | RemoteService of RemoteServiceError
 
@@ -282,7 +297,8 @@ module Domain =
 
     type ValidationResponse<'a> = AsyncResult<'a, ValidationError list>
 
-    type ToValidatedOrderLine = CheckProductCodeExists -> UnvalidatedOrderLine -> ValidatedOrderLine
+    type ToValidatedOrderLine =
+        CheckProductCodeExists -> UnvalidatedOrderLine -> Result<ValidatedOrderLine, ValidationError>
 
     let toValidatedOrderLine: ToValidatedOrderLine =
         fun checkProductCodeExists unvalidatedOrderLine ->
@@ -298,7 +314,7 @@ module Domain =
                   ProductCode = productCode
                   Quantity = orderQuantity }
 
-            validatedOrderLine
+            Ok validatedOrderLine
 
     type ValidatedOrder =
         { OrderId: OrderId
@@ -319,9 +335,6 @@ module Domain =
             let orderId: OrderId = unvalidatedOrder.OrderId |> String50 |> OrderId
             let customerInfo: CustomerInfo = unvalidatedOrder.CustomerInfo |> toCustomerInfo
 
-            let orderLines: ValidatedOrderLine list =
-                unvalidatedOrder.Lines |> List.map (toValidatedOrderLine checkProductCodeExists)
-
             result {
                 let! shippingAddress =
                     unvalidatedOrder.ShippingAddress
@@ -332,6 +345,12 @@ module Domain =
                     unvalidatedOrder.BillingAddress
                     |> toAddress checkAddressExists
                     |> Result.mapError RemoteService
+
+                let! orderLines =
+                    unvalidatedOrder.Lines
+                    |> List.map (toValidatedOrderLine checkProductCodeExists)
+                    |> Result.sequence
+                    |> Result.mapError Validation
 
                 return
                     { OrderId = orderId
