@@ -2,11 +2,11 @@
 
 open System
 
-type ResultBuilder() =
-    member this.Return(x) = Ok x
-    member this.Bind(m, f) = Result.bind f m
-
 module Result =
+    type Builder() =
+        member this.Return(x) = Ok x
+        member this.Bind(m, f) = Result.bind f m
+
     type Prepend<'a, 'b> = Result<'a, 'b> -> Result<'a list, 'b list> -> Result<'a list, 'b list>
 
     let prepend: Prepend<'a, 'b> =
@@ -85,7 +85,7 @@ type RemoteServiceError =
 type CheckAddressExists = UnvalidatedAddress -> Result<CheckedAddress, RemoteServiceError>
 
 module Domain =
-    let result = ResultBuilder()
+    let result = Result.Builder()
 
     let serviceExceptionAdapter serviceInfo serviceFn arg =
         try
