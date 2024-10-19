@@ -160,16 +160,15 @@ module Domain =
           ZipCode: ZipCode }
 
     let toAddress (checkAddressExists: CheckAddressExists) unvalidatedAddress =
-        let checkedAddress = checkAddressExists unvalidatedAddress
+        result {
+            let! checkedAddress = checkAddressExists unvalidatedAddress
 
-        match checkedAddress with
-        | Ok okAddress ->
-            let addressLine1 = okAddress.AddressLine1 |> String50.create
-            let addressLine2 = okAddress.AddressLine2 |> String50.createOption
-            let addressLine3 = okAddress.AddressLine3 |> String50.createOption
-            let addressLine4 = okAddress.AddressLine4 |> String50.createOption
-            let city = okAddress.City |> String50.create
-            let zipCode = okAddress.ZipCode |> ZipCode.create
+            let addressLine1 = checkedAddress.AddressLine1 |> String50.create
+            let addressLine2 = checkedAddress.AddressLine2 |> String50.createOption
+            let addressLine3 = checkedAddress.AddressLine3 |> String50.createOption
+            let addressLine4 = checkedAddress.AddressLine4 |> String50.createOption
+            let city = checkedAddress.City |> String50.create
+            let zipCode = checkedAddress.ZipCode |> ZipCode.create
 
             let address: Address =
                 { AddressLine1 = addressLine1
@@ -179,9 +178,8 @@ module Domain =
                   City = city
                   ZipCode = zipCode }
 
-            Ok address
-
-        | Error error -> Error error
+            return address
+        }
 
     type WidgetCode = WidgetCode of string
     type GizmoCode = GizmoCode of string
