@@ -64,6 +64,25 @@ type PlaceOrderCommand = Command<UnvalidatedOrder>
 
 type AsyncResult<'success, 'failure> = Async<Result<'success, 'failure>>
 
+module AsyncResult =
+    type Builder() =
+        member this.Return(x) = async { return Ok x }
+
+        member this.Bind(m, f) =
+            async {
+                let! res = m
+
+                match res with
+                | Ok v -> return! f v
+                | Error e -> return Error e
+            }
+
+    let mapError mapping result =
+        async {
+            let! syncResult = result
+            return Result.mapError mapping syncResult
+        }
+
 type CheckedAddress =
     { AddressLine1: string
       AddressLine2: string
@@ -82,10 +101,12 @@ type RemoteServiceError =
 
 // type CheckAddressExists = UnvalidatedAddress -> AsyncResult<CheckedAddress, AddressValidationError>
 
-type CheckAddressExists = UnvalidatedAddress -> Result<CheckedAddress, RemoteServiceError>
+type CheckAddressExists = UnvalidatedAddress -> AsyncResult<CheckedAddress, RemoteServiceError>
 
 module Domain =
     let result = Result.Builder()
+
+    let asyncResult = AsyncResult.Builder()
 
     let serviceExceptionAdapter serviceInfo serviceFn arg =
         try
@@ -160,7 +181,7 @@ module Domain =
           ZipCode: ZipCode }
 
     let toAddress (checkAddressExists: CheckAddressExists) unvalidatedAddress =
-        result {
+        asyncResult {
             let! checkedAddress = checkAddressExists unvalidatedAddress
 
             let addressLine1 = checkedAddress.AddressLine1 |> String50.create
@@ -326,29 +347,30 @@ module Domain =
     //     CheckProductCodeExists -> CheckAddressExists -> UnvalidatedOrder -> ValidationResponse<ValidatedOrder>
 
     type ValidateOrder =
-        CheckProductCodeExists -> CheckAddressExists -> UnvalidatedOrder -> Result<ValidatedOrder, PlaceOrderError>
+        CheckProductCodeExists -> CheckAddressExists -> UnvalidatedOrder -> AsyncResult<ValidatedOrder, PlaceOrderError>
 
     let validateOrder: ValidateOrder =
         fun checkProductCodeExists checkAddressExists unvalidatedOrder ->
             let orderId: OrderId = unvalidatedOrder.OrderId |> String50 |> OrderId
             let customerInfo: CustomerInfo = unvalidatedOrder.CustomerInfo |> toCustomerInfo
 
-            result {
+            asyncResult {
                 let! shippingAddress =
                     unvalidatedOrder.ShippingAddress
                     |> toAddress checkAddressExists
-                    |> Result.mapError RemoteService
+                    |> AsyncResult.mapError RemoteService
 
                 let! billingAddress =
                     unvalidatedOrder.BillingAddress
                     |> toAddress checkAddressExists
-                    |> Result.mapError RemoteService
+                    |> AsyncResult.mapError RemoteService
 
                 let! orderLines =
                     unvalidatedOrder.Lines
                     |> List.map (toValidatedOrderLine checkProductCodeExists)
                     |> Result.sequence
                     |> Result.mapError Validation
+                    |> async.Return
 
                 return
                     { OrderId = orderId
@@ -575,8 +597,7 @@ module Domain =
 
 
 
-    // type PlaceOrderWorkflow = PlaceOrder -> AsyncResult<PlaceOrderEvent list, PlaceOrderError>
-    type PlaceOrderWorkflow = UnvalidatedOrder -> Result<PlaceOrderEvent list, PlaceOrderError>
+    type PlaceOrderWorkflow = UnvalidatedOrder -> AsyncResult<PlaceOrderEvent list, PlaceOrderError>
 
     let placeOrder
         checkProductCodeExists
@@ -597,9 +618,9 @@ module Domain =
             let acknowledgeOrder =
                 acknowledgeOrder createOrderAcknowledgmentLetter sendOrderAcknowledgment
 
-            result {
+            asyncResult {
                 let! validatedOrder = unvalidatedOrder |> validateOrder
-                let! pricedOrder = priceOrder validatedOrder
+                let! pricedOrder = priceOrder validatedOrder |> async.Return
                 let orderAcknowledgementSent = pricedOrder |> acknowledgeOrder
                 return createEvents pricedOrder orderAcknowledgementSent
             }
